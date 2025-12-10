@@ -50,10 +50,7 @@ services:
       - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-4GB}
 
   mumuainovel:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mumujie/mumuainovel:latest
+    image: supertian7/mumuainovel:latest
     container_name: mumuainovel
     depends_on:
       postgres:
