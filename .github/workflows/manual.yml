@@ -1,0 +1,62 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main  # 推送到主分支时构建 latest
+    tags:
+      - 'v*'  # 推送版本标签时构建对应版本
+  workflow_dispatch:  # 允许手动触发
+
+env:
+  # Docker镜像名称（请修改为您的用户名）
+  DOCKER_IMAGE: supertian7/MMAINovel
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. 检出代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      # 2. 设置 QEMU（ARM64架构支持）
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      # 3. 设置 Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # 4. 登录 Docker Hub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      # 5. 准备镜像标签
+      - name: Prepare tags
+        id: tags
+        run: |
+          TAGS="${{ env.DOCKER_IMAGE }}:latest"
+          
+          # 如果是标签推送，添加版本标签
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+            TAGS="${{ env.DOCKER_IMAGE }}:${VERSION}"
+          fi
+          
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+      
+      # 6. 构建并推送 Docker 镜像
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
