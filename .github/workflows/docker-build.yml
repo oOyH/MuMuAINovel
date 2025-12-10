@@ -10,7 +10,7 @@ on:
 
 env:
   # Docker镜像名称（请修改为您的用户名）
-  DOCKER_IMAGE: supertian7/MMAINovel
+  DOCKER_IMAGE: supertian7/mmainovel
 
 jobs:
   build:
