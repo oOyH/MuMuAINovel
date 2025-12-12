@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+﻿import { useState, useEffect } from 'react';
 import { Button, List, Modal, Form, Input, message, Empty, Space, Popconfirm, Card, Select, Radio, Tag, InputNumber, Tooltip, Tabs } from 'antd';
 import { EditOutlined, DeleteOutlined, ThunderboltOutlined, BranchesOutlined, AppstoreAddOutlined, CheckCircleOutlined, ExclamationCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { useStore } from '../store';
@@ -9,6 +9,30 @@ import { SSEProgressModal } from '../components/SSEProgressModal';
 import { outlineApi, chapterApi, projectApi } from '../services/api';
 import type { OutlineExpansionResponse, BatchOutlineExpansionResponse } from '../types';
 
+// 角色预测数据类型
+interface PredictedCharacter {
+  name?: string;
+  role_description: string;
+  suggested_role_type: string;
+  importance: string;
+  appearance_chapter: number;
+  key_abilities: string[];
+  plot_function: string;
+  relationship_suggestions: Array<{
+    target_character_name: string;
+    relationship_type: string;
+    description?: string;
+  }>;
+}
+
+interface CharacterConfirmationData {
+  code: string;
+  message: string;
+  predicted_characters: PredictedCharacter[];
+  reason: string;
+  chapter_range: string;
+}
+
 const { TextArea } = Input;
 
 export default function Outline() {
@@ -17,23 +41,30 @@ export default function Outline() {
   const [editForm] = Form.useForm();
   const [generateForm] = Form.useForm();
   const [expansionForm] = Form.useForm();
+  const [modalApi, contextHolder] = Modal.useModal();
   const [batchExpansionForm] = Form.useForm();
   const [manualCreateForm] = Form.useForm();
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [isExpanding, setIsExpanding] = useState(false);
-  
+
   // ✅ 新增：记录每个大纲的展开状态
   const [outlineExpandStatus, setOutlineExpandStatus] = useState<Record<string, boolean>>({});
-  
+
+  // 角色确认相关状态
+  const [characterConfirmData, setCharacterConfirmData] = useState<CharacterConfirmationData | null>(null);
+  const [characterConfirmVisible, setCharacterConfirmVisible] = useState(false);
+  const [pendingGenerateData, setPendingGenerateData] = useState<any>(null);
+  const [selectedCharacterIndices, setSelectedCharacterIndices] = useState<number[]>([]);
+
   // 缓存批量展开的规划数据，避免重复AI调用
   const [cachedBatchExpansionResponse, setCachedBatchExpansionResponse] = useState<BatchOutlineExpansionResponse | null>(null);
-  
+
   // 批量展开预览的状态
   const [batchPreviewVisible, setBatchPreviewVisible] = useState(false);
   const [batchPreviewData, setBatchPreviewData] = useState<BatchOutlineExpansionResponse | null>(null);
   const [selectedOutlineIdx, setSelectedOutlineIdx] = useState(0);
   const [selectedChapterIdx, setSelectedChapterIdx] = useState(0);
-  
+
   // SSE进度状态
   const [sseProgress, setSSEProgress] = useState(0);
   const [sseMessage, setSSEMessage] = useState('');
@@ -67,7 +98,7 @@ export default function Outline() {
   useEffect(() => {
     const loadExpandStatus = async () => {
       if (outlines.length === 0) return;
-      
+
       const statusMap: Record<string, boolean> = {};
       for (const outline of outlines) {
         try {
@@ -80,9 +111,18 @@ export default function Outline() {
       }
       setOutlineExpandStatus(statusMap);
     };
-    
+
     loadExpandStatus();
   }, [outlines]);
+
+  // 当角色确认数据变化时，初始化选中状态（默认全选）
+  useEffect(() => {
+    if (characterConfirmData) {
+      setSelectedCharacterIndices(
+        characterConfirmData.predicted_characters.map((_, idx) => idx)
+      );
+    }
+  }, [characterConfirmData]);
 
   // 移除事件监听，避免无限循环
   // Hook 内部已经更新了 store，不需要再次刷新
@@ -96,7 +136,7 @@ export default function Outline() {
     const outline = outlines.find(o => o.id === id);
     if (outline) {
       editForm.setFieldsValue(outline);
-      Modal.confirm({
+      modalApi.confirm({
         title: '编辑大纲',
         width: 600,
         centered: true,
@@ -164,26 +204,27 @@ export default function Outline() {
     story_direction?: string;
     plot_stage?: 'development' | 'climax' | 'ending';
     keep_existing?: boolean;
+    enable_auto_characters?: boolean;
   }
 
   const handleGenerate = async (values: GenerateFormValues) => {
     try {
       setIsGenerating(true);
-      
+
       // 添加详细的调试日志
       console.log('=== 大纲生成调试信息 ===');
       console.log('1. Form values 原始数据:', values);
       console.log('2. values.model:', values.model);
       console.log('3. values.provider:', values.provider);
-      
+
       // 关闭生成表单Modal
       Modal.destroyAll();
-      
+
       // 显示进度Modal
       setSSEProgress(0);
       setSSEMessage('正在连接AI服务...');
       setSSEModalVisible(true);
-      
+
       // 准备请求数据
       const requestData: any = {
         project_id: currentProject.id,
@@ -195,9 +236,10 @@ export default function Outline() {
         requirements: values.requirements,
         mode: values.mode || 'auto',
         story_direction: values.story_direction,
-        plot_stage: values.plot_stage || 'development'
+        plot_stage: values.plot_stage || 'development',
+        enable_auto_characters: values.enable_auto_characters !== undefined ? values.enable_auto_characters : true
       };
-      
+
       // 只有在用户选择了模型时才添加model参数
       if (values.model) {
         requestData.model = values.model;
@@ -205,16 +247,16 @@ export default function Outline() {
       } else {
         console.log('4. values.model为空，不添加到请求');
       }
-      
+
       // 添加provider参数（如果有）
       if (values.provider) {
         requestData.provider = values.provider;
         console.log('5. 添加provider到请求:', values.provider);
       }
-      
+
       console.log('6. 最终请求数据:', JSON.stringify(requestData, null, 2));
       console.log('=========================');
-      
+
       // 使用SSE客户端
       const apiUrl = `/api/outlines/generate-stream`;
       const client = new SSEPostClient(apiUrl, requestData, {
@@ -225,7 +267,22 @@ export default function Outline() {
         onResult: (data: any) => {
           console.log('生成完成，结果:', data);
         },
+        onCharacterConfirmation: (data: any) => {
+          // ✨ 新增：处理角色确认事件
+          console.log('收到角色确认请求:', data);
+          // 关闭SSE进度Modal
+          setSSEModalVisible(false);
+          setIsGenerating(false);
+
+          // 保存待处理的生成数据
+          setPendingGenerateData(requestData);
+
+          // 显示角色确认对话框
+          setCharacterConfirmData(data);
+          setCharacterConfirmVisible(true);
+        },
         onError: (error: string) => {
+          // 现在只处理真正的错误
           message.error(`生成失败: ${error}`);
           setSSEModalVisible(false);
           setIsGenerating(false);
@@ -238,10 +295,10 @@ export default function Outline() {
           refreshOutlines();
         }
       });
-      
+
       // 开始连接
       client.connect();
-      
+
     } catch (error) {
       console.error('AI生成失败:', error);
       message.error('AI生成失败');
@@ -253,15 +310,15 @@ export default function Outline() {
   const showGenerateModal = async () => {
     const hasOutlines = outlines.length > 0;
     const initialMode = hasOutlines ? 'continue' : 'new';
-    
+
     // 直接加载可用模型列表
     const settingsResponse = await fetch('/api/settings');
     const settings = await settingsResponse.json();
     const { api_key, api_base_url, api_provider } = settings;
-    
-    let loadedModels: Array<{value: string, label: string}> = [];
+
+    let loadedModels: Array<{ value: string, label: string }> = [];
     let defaultModel: string | undefined = undefined;
-    
+
     if (api_key && api_base_url) {
       try {
         const modelsResponse = await fetch(
@@ -278,8 +335,8 @@ export default function Outline() {
         console.log('获取模型列表失败，将使用默认模型');
       }
     }
-    
-    Modal.confirm({
+
+    modalApi.confirm({
       title: hasOutlines ? (
         <Space>
           <span>AI生成/续写大纲</span>
@@ -301,6 +358,7 @@ export default function Outline() {
             keep_existing: true,
             theme: currentProject.theme || '',
             model: defaultModel, // 添加默认模型
+            enable_auto_characters: false, // 默认禁用自动角色引入
           }}
         >
           {hasOutlines && (
@@ -324,12 +382,12 @@ export default function Outline() {
             {({ getFieldValue }) => {
               const mode = getFieldValue('mode');
               const isContinue = mode === 'continue' || (mode === 'auto' && hasOutlines);
-              
+
               // 续写模式不显示主题输入，使用项目原有主题
               if (isContinue) {
                 return null;
               }
-              
+
               // 全新生成模式需要输入主题
               return (
                 <Form.Item
@@ -350,7 +408,7 @@ export default function Outline() {
             {({ getFieldValue }) => {
               const mode = getFieldValue('mode');
               const isContinue = mode === 'continue' || (mode === 'auto' && hasOutlines);
-              
+
               return (
                 <>
                   {isContinue && (
@@ -408,11 +466,25 @@ export default function Outline() {
                   <Form.Item label="其他要求" name="requirements">
                     <TextArea rows={2} placeholder="其他特殊要求（可选）" />
                   </Form.Item>
+
+                  {/* 自动角色引入开关 - 仅在续写模式显示 */}
+                  {isContinue && (
+                    <Form.Item
+                      label="智能角色引入"
+                      name="enable_auto_characters"
+                      tooltip="AI会根据剧情发展自动判断是否需要引入新角色，并自动创建角色卡片和建立关系"
+                    >
+                      <Radio.Group buttonStyle="solid">
+                        <Radio.Button value={true}>启用</Radio.Button>
+                        <Radio.Button value={false}>禁用</Radio.Button>
+                      </Radio.Group>
+                    </Form.Item>
+                  )}
                 </>
               );
             }}
           </Form.Item>
-          
+
           {/* 自定义模型选择 - 移到外层，所有模式都显示 */}
           {loadedModels.length > 0 && (
             <Form.Item
@@ -433,7 +505,7 @@ export default function Outline() {
                   console.log('已同步到Form，当前Form值:', generateForm.getFieldsValue());
                 }}
               />
-              <div style={{ color: '#666', fontSize: 12, marginTop: 4 }}>
+              <div style={{ color: 'var(--color-text-tertiary)', fontSize: 12, marginTop: 4 }}>
                 {defaultModel ? `当前默认模型: ${loadedModels.find(m => m.value === defaultModel)?.label || defaultModel}` : '未配置默认模型'}
               </div>
             </Form.Item>
@@ -454,8 +526,8 @@ export default function Outline() {
     const nextOrderIndex = outlines.length > 0
       ? Math.max(...outlines.map(o => o.order_index)) + 1
       : 1;
-    
-    Modal.confirm({
+
+    modalApi.confirm({
       title: '手动创建大纲',
       width: 600,
       centered: true,
@@ -474,7 +546,7 @@ export default function Outline() {
           >
             <InputNumber min={1} style={{ width: '100%' }} placeholder="自动计算的下一个序号" />
           </Form.Item>
-          
+
           <Form.Item
             label="大纲标题"
             name="title"
@@ -482,7 +554,7 @@ export default function Outline() {
           >
             <Input placeholder={currentProject?.outline_mode === 'one-to-one' ? '例如：第一章 初入江湖' : '例如：第一卷 初入江湖'} />
           </Form.Item>
-          
+
           <Form.Item
             label="大纲内容"
             name="content"
@@ -499,30 +571,30 @@ export default function Outline() {
       cancelText: '取消',
       onOk: async () => {
         const values = await manualCreateForm.validateFields();
-        
+
         // 校验序号是否重复
         const existingOutline = outlines.find(o => o.order_index === values.order_index);
         if (existingOutline) {
-          Modal.warning({
+          modalApi.warning({
             title: '序号冲突',
             content: (
               <div>
                 <p>序号 <strong>{values.order_index}</strong> 已被使用：</p>
                 <div style={{
                   padding: 12,
-                  background: '#fff7e6',
+                  background: 'var(--color-warning-bg)',
                   borderRadius: 4,
-                  border: '1px solid #ffd591',
+                  border: '1px solid var(--color-warning-border)',
                   marginTop: 8
                 }}>
-                  <div style={{ fontWeight: 500, color: '#fa8c16' }}>
+                  <div style={{ fontWeight: 500, color: 'var(--color-warning)' }}>
                     {currentProject?.outline_mode === 'one-to-one'
                       ? `第${existingOutline.order_index}章`
                       : `第${existingOutline.order_index}卷`
                     }：{existingOutline.title}
                   </div>
                 </div>
-                <p style={{ marginTop: 12, color: '#666' }}>
+                <p style={{ marginTop: 12, color: 'var(--color-text-secondary)' }}>
                   💡 建议使用序号 <strong>{nextOrderIndex}</strong>，或选择其他未使用的序号
                 </p>
               </div>
@@ -532,7 +604,7 @@ export default function Outline() {
           });
           throw new Error('序号重复');
         }
-        
+
         try {
           await outlineApi.createOutline({
             project_id: currentProject.id,
@@ -557,7 +629,7 @@ export default function Outline() {
   const handleExpandOutline = async (outlineId: string, outlineTitle: string) => {
     try {
       setIsExpanding(true);
-      
+
       // ✅ 新增：检查是否需要按顺序展开
       const currentOutline = sortedOutlines.find(o => o.id === outlineId);
       if (currentOutline) {
@@ -565,7 +637,7 @@ export default function Outline() {
         const previousOutlines = sortedOutlines.filter(
           o => o.order_index < currentOutline.order_index
         );
-        
+
         // 检查前面的大纲是否都已展开
         for (const prevOutline of previousOutlines) {
           try {
@@ -573,7 +645,7 @@ export default function Outline() {
             if (!prevChapters.has_chapters) {
               // 如果前面有未展开的大纲，显示提示并阻止操作
               setIsExpanding(false);
-              Modal.warning({
+              modalApi.warning({
                 title: '请按顺序展开大纲',
                 width: 600,
                 centered: true,
@@ -584,18 +656,18 @@ export default function Outline() {
                     </p>
                     <div style={{
                       padding: 12,
-                      background: '#fff7e6',
+                      background: 'var(--color-warning-bg)',
                       borderRadius: 4,
-                      border: '1px solid #ffd591'
+                      border: '1px solid var(--color-warning-border)'
                     }}>
-                      <div style={{ fontWeight: 500, marginBottom: 8, color: '#fa8c16' }}>
+                      <div style={{ fontWeight: 500, marginBottom: 8, color: 'var(--color-warning)' }}>
                         ⚠️ 需要先展开：
                       </div>
-                      <div style={{ color: '#666' }}>
+                      <div style={{ color: 'var(--color-text-secondary)' }}>
                         第{prevOutline.order_index}卷：《{prevOutline.title}》
                       </div>
                     </div>
-                    <p style={{ marginTop: 12, color: '#666', fontSize: 13 }}>
+                    <p style={{ marginTop: 12, color: 'var(--color-text-secondary)', fontSize: 13 }}>
                       💡 提示：您也可以使用「批量展开」功能，系统会自动按顺序处理所有大纲。
                     </p>
                   </div>
@@ -610,20 +682,20 @@ export default function Outline() {
           }
         }
       }
-      
+
       // 第一步：检查是否已有展开的章节
       const existingChapters = await outlineApi.getOutlineChapters(outlineId);
-      
+
       if (existingChapters.has_chapters && existingChapters.expansion_plans && existingChapters.expansion_plans.length > 0) {
         // 如果已有章节，显示已有的展开规划信息
         setIsExpanding(false);
         showExistingExpansionPreview(outlineTitle, existingChapters);
         return;
       }
-      
+
       // 如果没有章节，显示展开表单
       setIsExpanding(false);
-      Modal.confirm({
+      modalApi.confirm({
         title: (
           <Space>
             <BranchesOutlined />
@@ -634,9 +706,9 @@ export default function Outline() {
         centered: true,
         content: (
           <div>
-            <div style={{ marginBottom: 16, padding: 12, background: '#f5f5f5', borderRadius: 4 }}>
+            <div style={{ marginBottom: 16, padding: 12, background: 'var(--color-bg-layout)', borderRadius: 4 }}>
               <div style={{ fontWeight: 500, marginBottom: 4 }}>大纲标题</div>
-              <div style={{ color: '#666' }}>{outlineTitle}</div>
+              <div style={{ color: 'var(--color-text-secondary)' }}>{outlineTitle}</div>
             </div>
             <Form
               form={expansionForm}
@@ -679,23 +751,23 @@ export default function Outline() {
         onOk: async () => {
           try {
             const values = await expansionForm.validateFields();
-            
+
             // 关闭配置表单
             Modal.destroyAll();
-            
+
             // 显示SSE进度Modal
             setSSEProgress(0);
             setSSEMessage('正在准备展开大纲...');
             setSSEModalVisible(true);
             setIsExpanding(true);
-            
+
             // 准备请求数据
             const requestData = {
               ...values,
               auto_create_chapters: false, // 第一步：仅生成规划
               enable_scene_analysis: true
             };
-            
+
             // 使用SSE客户端调用新的流式端点
             const apiUrl = `/api/outlines/${outlineId}/expand-stream`;
             const client = new SSEPostClient(apiUrl, requestData, {
@@ -720,10 +792,10 @@ export default function Outline() {
                 setIsExpanding(false);
               }
             });
-            
+
             // 开始连接
             client.connect();
-            
+
           } catch (error) {
             console.error('展开失败:', error);
             message.error('展开失败');
@@ -738,7 +810,7 @@ export default function Outline() {
       setIsExpanding(false);
     }
   };
-  
+
   // 删除展开的章节内容（保留大纲）
   const handleDeleteExpandedChapters = async (outlineTitle: string, chapters: Array<{ id: string }>) => {
     try {
@@ -747,7 +819,7 @@ export default function Outline() {
         chapterApi.deleteChapter(chapter.id)
       );
       await Promise.all(deletePromises);
-      
+
       message.success(`已删除《${outlineTitle}》展开的所有 ${chapters.length} 个章节`);
       await refreshOutlines();
       // 刷新项目信息以更新字数显示
@@ -759,7 +831,7 @@ export default function Outline() {
       message.error(error.response?.data?.detail || '删除章节失败');
     }
   };
-  
+
   // 显示已存在章节的展开规划
   const showExistingExpansionPreview = (
     outlineTitle: string,
@@ -784,10 +856,10 @@ export default function Outline() {
       }> | null;
     }
   ) => {
-    const modal = Modal.info({
+    modalApi.info({
       title: (
         <Space style={{ flexWrap: 'wrap' }}>
-          <CheckCircleOutlined style={{ color: '#52c41a' }} />
+          <CheckCircleOutlined style={{ color: 'var(--color-success)' }} />
           <span>已存在的展开章节</span>
         </Space>
       ),
@@ -805,20 +877,20 @@ export default function Outline() {
           overflowY: 'auto'
         }
       },
-      footer: (_, { OkBtn }) => (
+      footer: (_: any, { OkBtn }: any) => (
         <Space wrap style={{ width: '100%', justifyContent: isMobile ? 'center' : 'flex-end' }}>
           <Button
             danger
             icon={<DeleteOutlined />}
             onClick={() => {
-              modal.destroy();
-              Modal.confirm({
+              Modal.destroyAll();
+              modalApi.confirm({
                 title: '确认删除',
                 icon: <ExclamationCircleOutlined />,
                 content: (
                   <div>
                     <p>此操作将删除大纲《{outlineTitle}》展开的所有 <strong>{data.chapter_count}</strong> 个章节。</p>
-                    <p style={{ color: '#1890ff', marginTop: 8 }}>
+                    <p style={{ color: 'var(--color-primary)', marginTop: 8 }}>
                       📝 注意：大纲本身会保留，您可以重新展开
                     </p>
                     <p style={{ color: '#ff4d4f', marginTop: 8 }}>
@@ -911,7 +983,7 @@ export default function Outline() {
                         <Tag color="green">约{plan.estimated_words}字</Tag>
                       </Space>
                     </Card>
-                    
+
                     <Card size="small" title="情节概要">
                       <div style={{
                         wordBreak: 'break-word',
@@ -921,7 +993,7 @@ export default function Outline() {
                         {plan.plot_summary}
                       </div>
                     </Card>
-                    
+
                     <Card size="small" title="叙事目标">
                       <div style={{
                         wordBreak: 'break-word',
@@ -931,7 +1003,7 @@ export default function Outline() {
                         {plan.narrative_goal}
                       </div>
                     </Card>
-                    
+
                     <Card size="small" title="关键事件">
                       <Space direction="vertical" size="small" style={{ width: '100%' }}>
                         {plan.key_events.map((event, eventIdx) => (
@@ -948,7 +1020,7 @@ export default function Outline() {
                         ))}
                       </Space>
                     </Card>
-                    
+
                     <Card size="small" title="涉及角色">
                       <Space wrap style={{ maxWidth: '100%' }}>
                         {plan.character_focus.map((char, charIdx) => (
@@ -967,7 +1039,7 @@ export default function Outline() {
                         ))}
                       </Space>
                     </Card>
-                    
+
                     {plan.scenes && plan.scenes.length > 0 && (
                       <Card size="small" title="场景">
                         <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -1006,13 +1078,14 @@ export default function Outline() {
                           ))}
                         </Space>
                       </Card>
-                    )}
+                    )
+                    }
                   </Space>
-                </div>
+                </div >
               )
             }))}
           />
-        </div>
+        </div >
       ),
     });
   };
@@ -1021,11 +1094,11 @@ export default function Outline() {
   const showExpansionPreview = (outlineId: string, response: OutlineExpansionResponse) => {
     // 缓存AI生成的规划数据
     const cachedPlans = response.chapter_plans;
-    
-    Modal.confirm({
+
+    modalApi.confirm({
       title: (
         <Space>
-          <CheckCircleOutlined style={{ color: '#52c41a' }} />
+          <CheckCircleOutlined style={{ color: 'var(--color-success)' }} />
           <span>展开规划预览</span>
         </Space>
       ),
@@ -1060,15 +1133,15 @@ export default function Outline() {
                         <Tag color="green">约{plan.estimated_words}字</Tag>
                       </Space>
                     </Card>
-                    
+
                     <Card size="small" title="情节概要">
                       {plan.plot_summary}
                     </Card>
-                    
+
                     <Card size="small" title="叙事目标">
                       {plan.narrative_goal}
                     </Card>
-                    
+
                     <Card size="small" title="关键事件">
                       <Space direction="vertical" size="small" style={{ width: '100%' }}>
                         {plan.key_events.map((event, eventIdx) => (
@@ -1076,7 +1149,7 @@ export default function Outline() {
                         ))}
                       </Space>
                     </Card>
-                    
+
                     <Card size="small" title="涉及角色">
                       <Space wrap>
                         {plan.character_focus.map((char, charIdx) => (
@@ -1084,7 +1157,7 @@ export default function Outline() {
                         ))}
                       </Space>
                     </Card>
-                    
+
                     {plan.scenes && plan.scenes.length > 0 && (
                       <Card size="small" title="场景">
                         <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -1122,20 +1195,20 @@ export default function Outline() {
   ) => {
     try {
       setIsExpanding(true);
-      
+
       // 使用新的API端点，直接传递缓存的规划数据
       const response = await outlineApi.createChaptersFromPlans(outlineId, cachedPlans);
-      
+
       message.success(
         `成功创建${response.chapters_created}个章节！`,
         3
       );
-      
+
       console.log('✅ 使用缓存的规划创建章节，避免了重复的AI调用');
-      
+
       // 刷新大纲和章节列表
       refreshOutlines();
-      
+
     } catch (error) {
       console.error('创建章节失败:', error);
       message.error('创建章节失败');
@@ -1151,7 +1224,7 @@ export default function Outline() {
       return;
     }
 
-    Modal.confirm({
+    modalApi.confirm({
       title: (
         <Space>
           <AppstoreAddOutlined />
@@ -1162,7 +1235,7 @@ export default function Outline() {
       centered: true,
       content: (
         <div>
-          <div style={{ marginBottom: 16, padding: 12, background: '#fff3cd', borderRadius: 4 }}>
+          <div style={{ marginBottom: 16, padding: 12, background: 'var(--color-warning-bg)', borderRadius: 4 }}>
             <div style={{ color: '#856404' }}>
               ⚠️ 将对当前项目的所有 {outlines.length} 个大纲进行展开
             </div>
@@ -1208,23 +1281,23 @@ export default function Outline() {
       onOk: async () => {
         try {
           const values = await batchExpansionForm.validateFields();
-          
+
           // 关闭配置表单
           Modal.destroyAll();
-          
+
           // 显示SSE进度Modal
           setSSEProgress(0);
           setSSEMessage('正在准备批量展开...');
           setSSEModalVisible(true);
           setIsExpanding(true);
-          
+
           // 准备请求数据
           const requestData = {
             project_id: currentProject.id,
             ...values,
             auto_create_chapters: false // 第一步：仅生成规划
           };
-          
+
           // 使用SSE客户端
           const apiUrl = `/api/outlines/batch-expand-stream`;
           const client = new SSEPostClient(apiUrl, requestData, {
@@ -1255,10 +1328,10 @@ export default function Outline() {
               setIsExpanding(false);
             }
           });
-          
+
           // 开始连接
           client.connect();
-          
+
         } catch (error) {
           console.error('批量展开失败:', error);
           message.error('批量展开失败');
@@ -1272,7 +1345,7 @@ export default function Outline() {
   // 渲染批量展开预览 Modal 内容
   const renderBatchPreviewContent = () => {
     if (!batchPreviewData) return null;
-    
+
     return (
       <div>
         {/* 顶部统计信息 */}
@@ -1284,17 +1357,17 @@ export default function Outline() {
             <Tag color="warning">跳过: {batchPreviewData.skipped_outlines.length} 个大纲</Tag>
           )}
         </div>
-        
+
         {/* 显示跳过的大纲信息 */}
         {batchPreviewData.skipped_outlines && batchPreviewData.skipped_outlines.length > 0 && (
           <div style={{
             marginBottom: 16,
             padding: 12,
-            background: '#fffbe6',
+            background: 'var(--color-warning-bg)',
             borderRadius: 4,
             border: '1px solid #ffe58f'
           }}>
-            <div style={{ fontWeight: 500, marginBottom: 8, color: '#faad14' }}>
+            <div style={{ fontWeight: 500, marginBottom: 8, color: 'var(--color-warning)' }}>
               ⚠️ 以下大纲已展开过，已自动跳过：
             </div>
             <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -1306,7 +1379,7 @@ export default function Outline() {
             </Space>
           </div>
         )}
-        
+
         {/* 水平三栏布局 */}
         <div style={{ display: 'flex', gap: 16, height: 500 }}>
           {/* 左栏：大纲列表 */}
@@ -1333,7 +1406,7 @@ export default function Outline() {
                     background: selectedOutlineIdx === idx ? '#e6f7ff' : 'transparent',
                     borderRadius: 4,
                     marginBottom: 4,
-                    border: selectedOutlineIdx === idx ? '1px solid #1890ff' : '1px solid transparent'
+                    border: selectedOutlineIdx === idx ? '1px solid var(--color-primary)' : '1px solid transparent'
                   }}
                 >
                   <div style={{ width: '100%' }}>
@@ -1349,7 +1422,7 @@ export default function Outline() {
               )}
             />
           </div>
-          
+
           {/* 中栏：章节列表 */}
           <div style={{
             width: 320,
@@ -1374,7 +1447,7 @@ export default function Outline() {
                       background: selectedChapterIdx === idx ? '#e6f7ff' : 'transparent',
                       borderRadius: 4,
                       marginBottom: 4,
-                      border: selectedChapterIdx === idx ? '1px solid #1890ff' : '1px solid transparent'
+                      border: selectedChapterIdx === idx ? '1px solid var(--color-primary)' : '1px solid transparent'
                     }}
                   >
                     <div style={{ width: '100%' }}>
@@ -1392,7 +1465,7 @@ export default function Outline() {
               />
             )}
           </div>
-          
+
           {/* 右栏：章节详情 */}
           <div style={{ flex: 1, overflowY: 'auto', paddingLeft: 12 }}>
             <div style={{ fontWeight: 500, marginBottom: 12, color: '#666' }}>章节详情</div>
@@ -1401,11 +1474,11 @@ export default function Outline() {
                 <Card size="small" title="情节概要" bordered={false}>
                   {batchPreviewData.expansion_results[selectedOutlineIdx].chapter_plans[selectedChapterIdx].plot_summary}
                 </Card>
-                
+
                 <Card size="small" title="叙事目标" bordered={false}>
                   {batchPreviewData.expansion_results[selectedOutlineIdx].chapter_plans[selectedChapterIdx].narrative_goal}
                 </Card>
-                
+
                 <Card size="small" title="关键事件" bordered={false}>
                   <Space direction="vertical" size="small" style={{ width: '100%' }}>
                     {batchPreviewData.expansion_results[selectedOutlineIdx].chapter_plans[selectedChapterIdx].key_events.map((event: string, eventIdx: number) => (
@@ -1413,7 +1486,7 @@ export default function Outline() {
                     ))}
                   </Space>
                 </Card>
-                
+
                 <Card size="small" title="涉及角色" bordered={false}>
                   <Space wrap>
                     {batchPreviewData.expansion_results[selectedOutlineIdx].chapter_plans[selectedChapterIdx].character_focus.map((char: string, charIdx: number) => (
@@ -1421,7 +1494,7 @@ export default function Outline() {
                     ))}
                   </Space>
                 </Card>
-                
+
                 {batchPreviewData.expansion_results[selectedOutlineIdx].chapter_plans[selectedChapterIdx].scenes && batchPreviewData.expansion_results[selectedOutlineIdx].chapter_plans[selectedChapterIdx].scenes!.length > 0 && (
                   <Card size="small" title="场景" bordered={false}>
                     <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -1462,19 +1535,19 @@ export default function Outline() {
   const handleConfirmBatchCreateChapters = async () => {
     try {
       setIsExpanding(true);
-      
+
       // 使用缓存的规划数据，避免重复调用AI
       if (!cachedBatchExpansionResponse) {
         message.error('规划数据丢失，请重新展开');
         return;
       }
-      
+
       console.log('✅ 使用缓存的批量规划数据创建章节，避免重复AI调用');
-      
+
       // 逐个大纲创建章节
       let totalCreated = 0;
       const errors: string[] = [];
-      
+
       for (const result of cachedBatchExpansionResponse.expansion_results) {
         try {
           // 使用create-chapters-from-plans接口，直接传递缓存的规划
@@ -1489,7 +1562,7 @@ export default function Outline() {
           console.error(`创建大纲 ${result.outline_title} 的章节失败:`, error);
         }
       }
-      
+
       // 显示结果
       if (errors.length === 0) {
         message.success(
@@ -1503,13 +1576,13 @@ export default function Outline() {
         );
         console.error('失败详情:', errors);
       }
-      
+
       // 清除缓存
       setCachedBatchExpansionResponse(null);
-      
+
       // 刷新列表
       refreshOutlines();
-      
+
     } catch (error) {
       console.error('批量创建章节失败:', error);
       message.error('批量创建章节失败');
@@ -1518,13 +1591,277 @@ export default function Outline() {
     }
   };
 
+  // 处理角色确认 - 用户同意创建角色
+  const handleConfirmCharacters = async (selectedCharacters: PredictedCharacter[]) => {
+    if (!pendingGenerateData) {
+      message.error('生成数据丢失，请重新操作');
+      return;
+    }
+
+    try {
+      setCharacterConfirmVisible(false);
+      setIsGenerating(true);
+
+      // 显示进度Modal
+      setSSEProgress(0);
+      setSSEMessage('正在创建确认的角色...');
+      setSSEModalVisible(true);
+
+      // 准备请求数据，添加确认的角色
+      const requestData = {
+        ...pendingGenerateData,
+        confirmed_characters: selectedCharacters
+      };
+
+      console.log('携带确认角色重新请求:', requestData);
+
+      // 重新发起SSE请求
+      const apiUrl = `/api/outlines/generate-stream`;
+      const client = new SSEPostClient(apiUrl, requestData, {
+        onProgress: (msg: string, progress: number) => {
+          setSSEMessage(msg);
+          setSSEProgress(progress);
+        },
+        onResult: (data: any) => {
+          console.log('生成完成，结果:', data);
+        },
+        onError: (error: string) => {
+          message.error(`生成失败: ${error}`);
+          setSSEModalVisible(false);
+          setIsGenerating(false);
+        },
+        onComplete: () => {
+          message.success('大纲生成完成！');
+          setSSEModalVisible(false);
+          setIsGenerating(false);
+          // 清理状态
+          setPendingGenerateData(null);
+          setCharacterConfirmData(null);
+          // 刷新大纲列表
+          refreshOutlines();
+        }
+      });
+
+      client.connect();
+
+    } catch (error) {
+      console.error('确认角色失败:', error);
+      message.error('操作失败');
+      setSSEModalVisible(false);
+      setIsGenerating(false);
+    }
+  };
+
+  // 处理角色确认 - 用户拒绝创建角色
+  const handleRejectCharacters = async () => {
+    if (!pendingGenerateData) {
+      message.error('生成数据丢失，请重新操作');
+      return;
+    }
+
+    try {
+      setCharacterConfirmVisible(false);
+      setIsGenerating(true);
+
+      // 显示进度Modal
+      setSSEProgress(0);
+      setSSEMessage('跳过角色创建，开始续写大纲...');
+      setSSEModalVisible(true);
+
+      // 准备请求数据，禁用自动角色引入
+      const requestData = {
+        ...pendingGenerateData,
+        enable_auto_characters: false  // 禁用自动角色引入
+      };
+
+      console.log('跳过角色创建，重新请求:', requestData);
+
+      // 重新发起SSE请求
+      const apiUrl = `/api/outlines/generate-stream`;
+      const client = new SSEPostClient(apiUrl, requestData, {
+        onProgress: (msg: string, progress: number) => {
+          setSSEMessage(msg);
+          setSSEProgress(progress);
+        },
+        onResult: (data: any) => {
+          console.log('生成完成，结果:', data);
+        },
+        onError: (error: string) => {
+          message.error(`生成失败: ${error}`);
+          setSSEModalVisible(false);
+          setIsGenerating(false);
+        },
+        onComplete: () => {
+          message.success('大纲生成完成！');
+          setSSEModalVisible(false);
+          setIsGenerating(false);
+          // 清理状态
+          setPendingGenerateData(null);
+          setCharacterConfirmData(null);
+          // 刷新大纲列表
+          refreshOutlines();
+        }
+      });
+
+      client.connect();
+
+    } catch (error) {
+      console.error('跳过角色创建失败:', error);
+      message.error('操作失败');
+      setSSEModalVisible(false);
+      setIsGenerating(false);
+    }
+  };
+
+  // 渲染角色确认对话框
+  const renderCharacterConfirmModal = () => {
+    if (!characterConfirmData) return null;
+
+    return (
+      <Modal
+        title={
+          <Space>
+            <ExclamationCircleOutlined style={{ color: 'var(--color-warning)' }} />
+            <span>确认引入新角色</span>
+          </Space>
+        }
+        open={characterConfirmVisible}
+        onOk={() => {
+          const selectedCharacters = characterConfirmData.predicted_characters.filter(
+            (_, idx) => selectedCharacterIndices.includes(idx)
+          );
+          handleConfirmCharacters(selectedCharacters);
+        }}
+        onCancel={() => {
+          modalApi.confirm({
+            title: '确认操作',
+            content: '是否跳过角色创建，直接续写大纲？',
+            okText: '跳过角色，继续续写',
+            cancelText: '返回选择',
+            onOk: handleRejectCharacters
+          });
+        }}
+        width={800}
+        centered
+        okText={`确认创建选中的 ${selectedCharacterIndices.length} 个角色`}
+        cancelText="跳过角色创建"
+      >
+        <div>
+          <div style={{ marginBottom: 16, padding: 12, background: 'var(--color-warning-bg)', borderRadius: 4, border: '1px solid var(--color-warning-border)' }}>
+            <div style={{ fontWeight: 500, marginBottom: 8, color: '#d48806' }}>
+              AI 分析结果
+            </div>
+            <div style={{ color: '#666', marginBottom: 8 }}>
+              {characterConfirmData.reason}
+            </div>
+            <Tag color="blue">{characterConfirmData.chapter_range}</Tag>
+            <Tag color="green">{characterConfirmData.predicted_characters.length} 个预测角色</Tag>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <Space>
+              <Button
+                size="small"
+                onClick={() => setSelectedCharacterIndices(
+                  characterConfirmData.predicted_characters.map((_, idx) => idx)
+                )}
+              >
+                全选
+              </Button>
+              <Button
+                size="small"
+                onClick={() => setSelectedCharacterIndices([])}
+              >
+                全不选
+              </Button>
+            </Space>
+          </div>
+
+          <List
+            dataSource={characterConfirmData.predicted_characters}
+            renderItem={(character, index) => (
+              <List.Item
+                key={index}
+                style={{
+                  background: selectedCharacterIndices.includes(index) ? '#f0f5ff' : 'transparent',
+                  padding: 12,
+                  borderRadius: 4,
+                  marginBottom: 8,
+                  border: selectedCharacterIndices.includes(index) ? '1px solid var(--color-primary)' : '1px solid var(--color-border-secondary)',
+                  cursor: 'pointer'
+                }}
+                onClick={() => {
+                  if (selectedCharacterIndices.includes(index)) {
+                    setSelectedCharacterIndices(selectedCharacterIndices.filter(i => i !== index));
+                  } else {
+                    setSelectedCharacterIndices([...selectedCharacterIndices, index]);
+                  }
+                }}
+              >
+                <div style={{ width: '100%' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <Space>
+                      <input
+                        type="checkbox"
+                        checked={selectedCharacterIndices.includes(index)}
+                        onChange={() => { }}
+                        style={{ cursor: 'pointer' }}
+                      />
+                      <span style={{ fontWeight: 500, fontSize: 16 }}>
+                        {character.name || character.role_description}
+                      </span>
+                      <Tag color="blue">{character.suggested_role_type}</Tag>
+                      <Tag color="orange">{character.importance}</Tag>
+                    </Space>
+                    <Tag>第{character.appearance_chapter}章登场</Tag>
+                  </div>
+
+                  <div style={{ marginBottom: 8, color: '#666' }}>
+                    <strong>剧情作用：</strong>{character.plot_function}
+                  </div>
+
+                  {character.key_abilities && character.key_abilities.length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <strong>关键能力：</strong>
+                      <Space wrap style={{ marginLeft: 8 }}>
+                        {character.key_abilities.map((ability, idx) => (
+                          <Tag key={idx} color="purple">{ability}</Tag>
+                        ))}
+                      </Space>
+                    </div>
+                  )}
+
+                  {character.relationship_suggestions && character.relationship_suggestions.length > 0 && (
+                    <div>
+                      <strong>建议关系：</strong>
+                      <Space wrap style={{ marginLeft: 8 }}>
+                        {character.relationship_suggestions.map((rel, idx) => (
+                          <Tag key={idx} color="cyan">
+                            {rel.target_character_name} - {rel.relationship_type}
+                          </Tag>
+                        ))}
+                      </Space>
+                    </div>
+                  )}
+                </div>
+              </List.Item>
+            )}
+          />
+        </div>
+      </Modal>
+    );
+  };
+
   return (
     <>
+      {/* 角色确认对话框 */}
+      {renderCharacterConfirmModal()}
+
       {/* 批量展开预览 Modal */}
       <Modal
         title={
           <Space>
-            <CheckCircleOutlined style={{ color: '#52c41a' }} />
+            <CheckCircleOutlined style={{ color: 'var(--color-success)' }} />
             <span>批量展开规划预览</span>
           </Space>
         }
@@ -1540,6 +1877,7 @@ export default function Outline() {
         {renderBatchPreviewContent()}
       </Modal>
 
+      {contextHolder}
       {/* SSE进度Modal - 使用统一组件 */}
       <SSEProgressModal
         visible={sseModalVisible}
@@ -1549,177 +1887,177 @@ export default function Outline() {
       />
 
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* 固定头部 */}
-      <div style={{
-        position: 'sticky',
-        top: 0,
-        zIndex: 10,
-        backgroundColor: '#fff',
-        padding: isMobile ? '12px 0' : '16px 0',
-        marginBottom: isMobile ? 12 : 16,
-        borderBottom: '1px solid #f0f0f0',
-        display: 'flex',
-        flexDirection: isMobile ? 'column' : 'row',
-        gap: isMobile ? 12 : 0,
-        justifyContent: 'space-between',
-        alignItems: isMobile ? 'stretch' : 'center'
-      }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <h2 style={{ margin: 0, fontSize: isMobile ? 18 : 24 }}>故事大纲</h2>
-          {currentProject?.outline_mode && (
-            <Tag color={currentProject.outline_mode === 'one-to-one' ? 'blue' : 'green'} style={{ width: 'fit-content' }}>
-              {currentProject.outline_mode === 'one-to-one' ? '传统模式 (1→1)' : '细化模式 (1→N)'}
-            </Tag>
-          )}
+        {/* 固定头部 */}
+        <div style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 10,
+          backgroundColor: 'var(--color-bg-container)',
+          padding: isMobile ? '12px 0' : '16px 0',
+          marginBottom: isMobile ? 12 : 16,
+          borderBottom: '1px solid #f0f0f0',
+          display: 'flex',
+          flexDirection: isMobile ? 'column' : 'row',
+          gap: isMobile ? 12 : 0,
+          justifyContent: 'space-between',
+          alignItems: isMobile ? 'stretch' : 'center'
+        }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <h2 style={{ margin: 0, fontSize: isMobile ? 18 : 24 }}>故事大纲</h2>
+            {currentProject?.outline_mode && (
+              <Tag color={currentProject.outline_mode === 'one-to-one' ? 'blue' : 'green'} style={{ width: 'fit-content' }}>
+                {currentProject.outline_mode === 'one-to-one' ? '传统模式 (1→1)' : '细化模式 (1→N)'}
+              </Tag>
+            )}
+          </div>
+          <Space size="small" wrap={isMobile}>
+            <Button
+              icon={<PlusOutlined />}
+              onClick={showManualCreateOutlineModal}
+              block={isMobile}
+            >
+              手动创建
+            </Button>
+            <Button
+              type="primary"
+              icon={<ThunderboltOutlined />}
+              onClick={showGenerateModal}
+              loading={isGenerating}
+              block={isMobile}
+            >
+              {isMobile ? 'AI生成/续写' : 'AI生成/续写大纲'}
+            </Button>
+            {outlines.length > 0 && currentProject?.outline_mode === 'one-to-many' && (
+              <Tooltip title="将所有大纲展开为多章，实现从大纲到章节的一对多关系">
+                <Button
+                  icon={<AppstoreAddOutlined />}
+                  onClick={handleBatchExpandOutlines}
+                  loading={isExpanding}
+                  disabled={isGenerating}
+                >
+                  {isMobile ? '批量展开' : '批量展开为多章'}
+                </Button>
+              </Tooltip>
+            )}
+          </Space>
         </div>
-        <Space size="small" wrap={isMobile}>
-          <Button
-            icon={<PlusOutlined />}
-            onClick={showManualCreateOutlineModal}
-            block={isMobile}
-          >
-            手动创建
-          </Button>
-          <Button
-            type="primary"
-            icon={<ThunderboltOutlined />}
-            onClick={showGenerateModal}
-            loading={isGenerating}
-            block={isMobile}
-          >
-            {isMobile ? 'AI生成/续写' : 'AI生成/续写大纲'}
-          </Button>
-          {outlines.length > 0 && currentProject?.outline_mode === 'one-to-many' && (
-            <Tooltip title="将所有大纲展开为多章，实现从大纲到章节的一对多关系">
-              <Button
-                icon={<AppstoreAddOutlined />}
-                onClick={handleBatchExpandOutlines}
-                loading={isExpanding}
-                disabled={isGenerating}
-              >
-                {isMobile ? '批量展开' : '批量展开为多章'}
-              </Button>
-            </Tooltip>
-          )}
-        </Space>
-      </div>
 
-      {/* 可滚动内容区域 */}
-      <div style={{ flex: 1, overflowY: 'auto' }}>
-        {outlines.length === 0 ? (
-        <Empty description="还没有大纲，开始创建吧！" />
-      ) : (
-        <Card style={cardStyles.base}>
-          <List
-            dataSource={sortedOutlines}
-            renderItem={(item) => (
-              <List.Item
-                style={{
-                  padding: '16px 0',
-                  borderRadius: 8,
-                  transition: 'background 0.3s ease',
-                  flexDirection: isMobile ? 'column' : 'row',
-                  alignItems: isMobile ? 'flex-start' : 'center'
-                }}
-                actions={isMobile ? undefined : [
-                  ...(currentProject?.outline_mode === 'one-to-many' ? [
-                    <Tooltip title="展开为多章">
-                      <Button
-                        type="text"
-                        icon={<BranchesOutlined />}
-                        onClick={() => handleExpandOutline(item.id, item.title)}
-                        loading={isExpanding}
-                      >
-                        展开
-                      </Button>
-                    </Tooltip>
-                  ] : []), // 一对一模式：不显示任何展开/创建按钮
-                  <Button
-                    type="text"
-                    icon={<EditOutlined />}
-                    onClick={() => handleOpenEditModal(item.id)}
-                  >
-                    编辑
-                  </Button>,
-                  <Popconfirm
-                    title="确定删除这条大纲吗？"
-                    onConfirm={() => handleDeleteOutline(item.id)}
-                    okText="确定"
-                    cancelText="取消"
-                  >
-                    <Button type="text" danger icon={<DeleteOutlined />}>
-                      删除
-                    </Button>
-                  </Popconfirm>,
-                ]}
-              >
-                <div style={{ width: '100%' }}>
-                  <List.Item.Meta
-                    title={
-                      <Space size="small" style={{ fontSize: isMobile ? 14 : 16, flexWrap: 'wrap' }}>
-                        <span style={{ color: '#1890ff', fontWeight: 'bold' }}>
-                          {currentProject?.outline_mode === 'one-to-one'
-                            ? `第${item.order_index || '?'}章`
-                            : `第${item.order_index || '?'}卷`
-                          }
-                        </span>
-                        <span>{item.title}</span>
-                        {/* ✅ 新增：展开状态标识 - 仅在一对多模式显示 */}
-                        {currentProject?.outline_mode === 'one-to-many' && (
-                          outlineExpandStatus[item.id] ? (
-                            <Tag color="success" icon={<CheckCircleOutlined />}>已展开</Tag>
-                          ) : (
-                            <Tag color="default">未展开</Tag>
-                          )
-                        )}
-                      </Space>
-                    }
-                    description={
-                      <div style={{ fontSize: isMobile ? 12 : 14 }}>
-                        {item.content}
-                      </div>
-                    }
-                  />
-                  
-                  {/* 移动端：按钮显示在内容下方 */}
-                  {isMobile && (
-                    <Space style={{ marginTop: 12, width: '100%', justifyContent: 'flex-end' }} wrap>
-                      <Button
-                        type="text"
-                        icon={<EditOutlined />}
-                        onClick={() => handleOpenEditModal(item.id)}
-                        size="small"
-                      />
-                      {/* 一对多模式：显示展开按钮 */}
-                      {currentProject?.outline_mode === 'one-to-many' && (
+        {/* 可滚动内容区域 */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {outlines.length === 0 ? (
+            <Empty description="还没有大纲，开始创建吧！" />
+          ) : (
+            <Card style={cardStyles.base}>
+              <List
+                dataSource={sortedOutlines}
+                renderItem={(item) => (
+                  <List.Item
+                    style={{
+                      padding: '16px 0',
+                      borderRadius: 8,
+                      transition: 'background 0.3s ease',
+                      flexDirection: isMobile ? 'column' : 'row',
+                      alignItems: isMobile ? 'flex-start' : 'center'
+                    }}
+                    actions={isMobile ? undefined : [
+                      ...(currentProject?.outline_mode === 'one-to-many' ? [
                         <Tooltip title="展开为多章">
                           <Button
                             type="text"
                             icon={<BranchesOutlined />}
                             onClick={() => handleExpandOutline(item.id, item.title)}
                             loading={isExpanding}
-                            size="small"
-                          />
+                          >
+                            展开
+                          </Button>
                         </Tooltip>
-                      )}
-                      {/* 一对一模式：不显示任何展开/创建按钮 */}
+                      ] : []), // 一对一模式：不显示任何展开/创建按钮
+                      <Button
+                        type="text"
+                        icon={<EditOutlined />}
+                        onClick={() => handleOpenEditModal(item.id)}
+                      >
+                        编辑
+                      </Button>,
                       <Popconfirm
                         title="确定删除这条大纲吗？"
                         onConfirm={() => handleDeleteOutline(item.id)}
                         okText="确定"
                         cancelText="取消"
                       >
-                        <Button type="text" danger icon={<DeleteOutlined />} size="small" />
-                      </Popconfirm>
-                    </Space>
-                  )}
-                </div>
-              </List.Item>
-            )}
-          />
-        </Card>
-        )}
-      </div>
+                        <Button type="text" danger icon={<DeleteOutlined />}>
+                          删除
+                        </Button>
+                      </Popconfirm>,
+                    ]}
+                  >
+                    <div style={{ width: '100%' }}>
+                      <List.Item.Meta
+                        title={
+                          <Space size="small" style={{ fontSize: isMobile ? 14 : 16, flexWrap: 'wrap' }}>
+                            <span style={{ color: 'var(--color-primary)', fontWeight: 'bold' }}>
+                              {currentProject?.outline_mode === 'one-to-one'
+                                ? `第${item.order_index || '?'}章`
+                                : `第${item.order_index || '?'}卷`
+                              }
+                            </span>
+                            <span>{item.title}</span>
+                            {/* ✅ 新增：展开状态标识 - 仅在一对多模式显示 */}
+                            {currentProject?.outline_mode === 'one-to-many' && (
+                              outlineExpandStatus[item.id] ? (
+                                <Tag color="success" icon={<CheckCircleOutlined />}>已展开</Tag>
+                              ) : (
+                                <Tag color="default">未展开</Tag>
+                              )
+                            )}
+                          </Space>
+                        }
+                        description={
+                          <div style={{ fontSize: isMobile ? 12 : 14 }}>
+                            {item.content}
+                          </div>
+                        }
+                      />
+
+                      {/* 移动端：按钮显示在内容下方 */}
+                      {isMobile && (
+                        <Space style={{ marginTop: 12, width: '100%', justifyContent: 'flex-end' }} wrap>
+                          <Button
+                            type="text"
+                            icon={<EditOutlined />}
+                            onClick={() => handleOpenEditModal(item.id)}
+                            size="small"
+                          />
+                          {/* 一对多模式：显示展开按钮 */}
+                          {currentProject?.outline_mode === 'one-to-many' && (
+                            <Tooltip title="展开为多章">
+                              <Button
+                                type="text"
+                                icon={<BranchesOutlined />}
+                                onClick={() => handleExpandOutline(item.id, item.title)}
+                                loading={isExpanding}
+                                size="small"
+                              />
+                            </Tooltip>
+                          )}
+                          {/* 一对一模式：不显示任何展开/创建按钮 */}
+                          <Popconfirm
+                            title="确定删除这条大纲吗？"
+                            onConfirm={() => handleDeleteOutline(item.id)}
+                            okText="确定"
+                            cancelText="取消"
+                          >
+                            <Button type="text" danger icon={<DeleteOutlined />} size="small" />
+                          </Popconfirm>
+                        </Space>
+                      )}
+                    </div>
+                  </List.Item>
+                )}
+              />
+            </Card>
+          )}
+        </div>
       </div>
     </>
   );
