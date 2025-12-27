@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-green.svg)
 ![React](https://img.shields.io/badge/react-18.3.1-blue.svg)
@@ -41,17 +41,49 @@
 - 💾 **PostgreSQL** - 生产级数据库，多用户数据隔离
 - 🐳 **Docker 部署** - 一键启动，开箱即用
 
+## 📸 项目预览
+
+<details>
+
+<summary>多图预警</summary>
+
+<div align="center">
+
+### 登录界面
+![登录界面](images/1.png)
+
+### 主界面
+![主界面](images/2.png)
+
+### 项目管理
+![项目管理](images/3.png)
+
+### 赞助我 💖
+![赞助我](images/4.png)
+
+</div>
+
+</details>
+
 ## 📋 TODO List
+
+### ✅ 已完成功能
 
 - [x] **灵感模式** - 创作灵感和点子生成
 - [x] **自定义写作风格** - 支持自定义 AI 写作风格
 - [x] **数据导入导出** - 项目数据的导入导出
-- [ ] **Prompt 调整界面** - 可视化编辑 Prompt 模板
+- [x] **Prompt 调整界面** - 可视化编辑 Prompt 模板
 - [x] **章节字数限制** - 用户可设置生成字数
-- [ ] **设定追溯与矛盾检测** - 自动检测设定冲突
-- [ ] **思维链与章节关系图谱** - 可视化章节逻辑关系
+- [x] **思维链与章节关系图谱** - 可视化章节逻辑关系
 - [x] **根据分析一键重写** - 根据分析建议重新生成
 - [x] **Linux DO 自动创建账号** - OAuth 登录自动生成账号
+- [x] **职业等级体系** - 自定义职业和等级系统，支持修仙境界、魔法等级等多种体系
+
+### 📝 规划中功能
+
+- [ ] **角色/组织卡片导入导出** - 单独导出角色和组织卡片，支持跨项目数据共享
+- [ ] **伏笔管理** - 智能追踪剧情伏笔，提醒未回收线索，可视化伏笔时间线
+- [ ] **提示词工坊** - 社区驱动的 Prompt 模板分享平台，一键导入优质提示词
 
 > 💡 欢迎提交 Issue 或 Pull Request！
 
@@ -327,6 +359,14 @@ MuMuAINovel/
 3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
 4. 推送到分支 (`git push origin feature/AmazingFeature`)
 5. 提交 Pull Request
+
+### 贡献者
+
+感谢所有为本项目做出贡献的开发者！
+
+<a href="https://github.com/xiamuceer-j/MuMuAINovel/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=xiamuceer-j/MuMuAINovel" />
+</a>
 
 ## 📝 许可证
 

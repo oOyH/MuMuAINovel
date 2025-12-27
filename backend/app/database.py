@@ -21,7 +21,7 @@ from app.models import (
     Settings, WritingStyle, ProjectDefaultStyle,
     RelationshipType, CharacterRelationship, Organization, OrganizationMember,
     StoryMemory, PlotAnalysis, AnalysisTask, BatchGenerationTask,
-    RegenerationTask
+    RegenerationTask, Career, CharacterCareer, User, MCPPlugin, PromptTemplate
 )
 
 # 引擎缓存：每个用户一个引擎
@@ -223,147 +223,25 @@ async def get_db(request: Request):
             except:
                 pass
 
-async def _init_relationship_types(user_id: str):
-    """为指定用户初始化预置的关系类型数据
+async def init_db(user_id: str = None):
+    """
+    初始化数据库（已弃用）
+    
+    ⚠️ 此函数已弃用，仅保留用于向后兼容
+    
+    新的最佳实践:
+    - 表结构管理: 使用 'alembic upgrade head'
+    - 用户配置: Settings 在首次访问时自动创建（延迟初始化）
     
     Args:
-        user_id: 用户ID
+        user_id: 用户ID (已不再使用)
     """
-    from app.models.relationship import RelationshipType
-    
-    relationship_types = [
-        {"name": "父亲", "category": "family", "reverse_name": "子女", "intimacy_range": "high", "icon": "👨"},
-        {"name": "母亲", "category": "family", "reverse_name": "子女", "intimacy_range": "high", "icon": "👩"},
-        {"name": "兄弟", "category": "family", "reverse_name": "兄弟", "intimacy_range": "high", "icon": "👬"},
-        {"name": "姐妹", "category": "family", "reverse_name": "姐妹", "intimacy_range": "high", "icon": "👭"},
-        {"name": "子女", "category": "family", "reverse_name": "父母", "intimacy_range": "high", "icon": "👶"},
-        {"name": "配偶", "category": "family", "reverse_name": "配偶", "intimacy_range": "high", "icon": "💑"},
-        {"name": "恋人", "category": "family", "reverse_name": "恋人", "intimacy_range": "high", "icon": "💕"},
-        
-        {"name": "师父", "category": "social", "reverse_name": "徒弟", "intimacy_range": "high", "icon": "🎓"},
-        {"name": "徒弟", "category": "social", "reverse_name": "师父", "intimacy_range": "high", "icon": "📚"},
-        {"name": "朋友", "category": "social", "reverse_name": "朋友", "intimacy_range": "medium", "icon": "🤝"},
-        {"name": "同学", "category": "social", "reverse_name": "同学", "intimacy_range": "medium", "icon": "🎒"},
-        {"name": "邻居", "category": "social", "reverse_name": "邻居", "intimacy_range": "low", "icon": "🏘️"},
-        {"name": "知己", "category": "social", "reverse_name": "知己", "intimacy_range": "high", "icon": "💙"},
-        
-        {"name": "上司", "category": "professional", "reverse_name": "下属", "intimacy_range": "low", "icon": "👔"},
-        {"name": "下属", "category": "professional", "reverse_name": "上司", "intimacy_range": "low", "icon": "💼"},
-        {"name": "同事", "category": "professional", "reverse_name": "同事", "intimacy_range": "medium", "icon": "🤵"},
-        {"name": "合作伙伴", "category": "professional", "reverse_name": "合作伙伴", "intimacy_range": "medium", "icon": "🤜🤛"},
-        
-        {"name": "敌人", "category": "hostile", "reverse_name": "敌人", "intimacy_range": "low", "icon": "⚔️"},
-        {"name": "仇人", "category": "hostile", "reverse_name": "仇人", "intimacy_range": "low", "icon": "💢"},
-        {"name": "竞争对手", "category": "hostile", "reverse_name": "竞争对手", "intimacy_range": "low", "icon": "🎯"},
-        {"name": "宿敌", "category": "hostile", "reverse_name": "宿敌", "intimacy_range": "low", "icon": "⚡"},
-    ]
-    
-    try:
-        engine = await get_engine(user_id)
-        AsyncSessionLocal = async_sessionmaker(
-            engine,
-            class_=AsyncSession,
-            expire_on_commit=False
-        )
-        
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(RelationshipType))
-            existing = result.scalars().first()
-            
-            if existing:
-                logger.info(f"用户 {user_id} 的关系类型数据已存在，跳过初始化")
-                return
-            
-            logger.info(f"开始为用户 {user_id} 插入关系类型数据...")
-            for rt_data in relationship_types:
-                relationship_type = RelationshipType(**rt_data)
-                session.add(relationship_type)
-            
-            await session.commit()
-            logger.info(f"成功为用户 {user_id} 插入 {len(relationship_types)} 条关系类型数据")
-            
-    except Exception as e:
-        logger.error(f"用户 {user_id} 初始化关系类型数据失败: {str(e)}", exc_info=True)
-        raise
-
-
-
-async def _init_global_writing_styles(user_id: str):
-    """为指定用户初始化全局预设写作风格
-    
-    全局预设风格的 project_id 为 NULL，所有用户共享
-    只在第一次创建数据库时插入一次
-    
-    Args:
-        user_id: 用户ID
-    """
-    from app.models.writing_style import WritingStyle
-    from app.services.prompt_service import WritingStyleManager
-    
-    try:
-        engine = await get_engine(user_id)
-        AsyncSessionLocal = async_sessionmaker(
-            engine,
-            class_=AsyncSession,
-            expire_on_commit=False
-        )
-        
-        async with AsyncSessionLocal() as session:
-            # 检查是否已存在全局预设风格
-            result = await session.execute(
-                select(WritingStyle).where(WritingStyle.user_id.is_(None))
-            )
-            existing = result.scalars().first()
-            
-            if existing:
-                logger.info(f"用户 {user_id} 的全局预设风格已存在，跳过初始化")
-                return
-            
-            logger.info(f"开始为用户 {user_id} 插入全局预设写作风格...")
-            
-            # 获取所有预设风格配置
-            presets = WritingStyleManager.get_all_presets()
-            
-            for index, (preset_id, preset_data) in enumerate(presets.items(), start=1):
-                style = WritingStyle(
-                    user_id=None,  # NULL 表示全局预设
-                    name=preset_data["name"],
-                    style_type="preset",
-                    preset_id=preset_id,
-                    description=preset_data["description"],
-                    prompt_content=preset_data["prompt_content"],
-                    order_index=index
-                )
-                session.add(style)
-            
-            await session.commit()
-            logger.info(f"成功为用户 {user_id} 插入 {len(presets)} 个全局预设写作风格")
-            
-    except Exception as e:
-        logger.error(f"用户 {user_id} 初始化全局预设写作风格失败: {str(e)}", exc_info=True)
-        raise
-
-
-async def init_db(user_id: str):
-    """初始化指定用户的数据库,创建所有表并插入预置数据
-    
-    Args:
-        user_id: 用户ID
-    """
-    try:
-        logger.info(f"开始初始化用户 {user_id} 的数据库...")
-        engine = await get_engine(user_id)
-        
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        
-        await _init_relationship_types(user_id)
-        await _init_global_writing_styles(user_id)
-        
-        logger.info(f"用户 {user_id} 的数据库初始化成功")
-    except Exception as e:
-        logger.error(f"用户 {user_id} 的数据库初始化失败: {str(e)}", exc_info=True)
-        raise
+    logger.warning(
+        "⚠️ init_db() 已弃用且无实际作用！\n"
+        "   - 表结构: 由 Alembic 管理\n"
+        "   - 用户配置: Settings API 自动创建\n"
+        "   建议移除此调用"
+    )
 
 
 async def close_db():
